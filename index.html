@@ -1,0 +1,315 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bot tracker</title>
+<style>
+  :root{
+    --ink:#101419; --panel:#181E26; --line:#2A323D;
+    --text:#E9E7E2; --dim:#8A929C;
+    --signal:#F5A524; --track:#5DCAA5; --warn:#E2725B;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  body{
+    margin:0; background:var(--ink); color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.5;
+    padding:14px 14px calc(24px + env(safe-area-inset-bottom));
+    max-width:520px; margin-inline:auto;
+  }
+  h1{font-size:17px; font-weight:500; margin:0 0 2px}
+  .sub{color:var(--dim); font-size:13px; margin:0 0 14px}
+
+  .stage{position:relative; background:#000; border:1px solid var(--line); border-radius:10px; overflow:hidden; aspect-ratio:4/3}
+  video,canvas.ov{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block}
+  canvas.ov{touch-action:none}
+  .hint{
+    position:absolute; left:0; right:0; bottom:0; padding:10px 12px;
+    background:rgba(16,20,25,.88); font-size:13px; color:var(--text);
+    border-top:1px solid var(--line);
+  }
+  .hint.off{display:none}
+  .empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    padding:24px; text-align:center; color:var(--dim); font-size:14px}
+
+  .readout{display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line);
+    border:1px solid var(--line); border-top:none; border-radius:0 0 10px 10px; overflow:hidden; margin-bottom:14px}
+  .cell{background:var(--panel); padding:10px 12px 12px}
+  .cell .v{font-size:26px; font-weight:500; font-variant-numeric:tabular-nums; letter-spacing:-.01em; line-height:1.15}
+  .cell .k{font-size:12px; color:var(--dim)}
+  .cell.hot .v{color:var(--signal)}
+
+  .row{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+  button{
+    flex:1 1 auto; min-width:104px; padding:11px 12px; border-radius:8px;
+    border:1px solid var(--line); background:var(--panel); color:var(--text);
+    font:inherit; font-size:14px; cursor:pointer;
+  }
+  button:active{background:#212933}
+  button:focus-visible{outline:2px solid var(--track); outline-offset:2px}
+  button[disabled]{opacity:.4; cursor:default}
+  button.on{background:var(--signal); border-color:var(--signal); color:#2A1B02}
+  button.armed{border-color:var(--track); color:var(--track)}
+
+  .tune{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:10px}
+  .tune label{display:flex; align-items:center; gap:10px; font-size:13px; color:var(--dim); margin:8px 0}
+  .tune label:first-child{margin-top:0}
+  .tune label span:first-child{flex:0 0 96px}
+  .tune output{flex:0 0 46px; text-align:right; color:var(--text); font-variant-numeric:tabular-nums}
+  input[type=range]{flex:1; accent-color:var(--track); min-width:0}
+  input[type=number]{width:74px; padding:6px 8px; border-radius:6px; border:1px solid var(--line);
+    background:var(--ink); color:var(--text); font:inherit; font-variant-numeric:tabular-nums}
+  .status{font-size:13px; color:var(--dim); min-height:20px}
+  .status.bad{color:var(--warn)}
+</style>
+
+<h1>Bot tracker</h1>
+<p class="sub">Tape a bright marker on top of your robot, point a fixed camera at the field, and record.</p>
+
+<div class="stage">
+  <video id="vid" playsinline muted></video>
+  <canvas class="ov" id="ov"></canvas>
+  <div class="empty" id="empty">Camera is off. Tap Start camera below.</div>
+  <div class="hint off" id="hint"></div>
+</div>
+
+<div class="readout">
+  <div class="cell"><div class="v" id="rPos">—</div><div class="k" id="kPos">position</div></div>
+  <div class="cell"><div class="v" id="rVel">—</div><div class="k" id="kVel">speed</div></div>
+  <div class="cell" id="cDwell"><div class="v" id="rDwell">0.0</div><div class="k">dwell, s</div></div>
+</div>
+
+<div class="row">
+  <button id="bStart">Start camera</button>
+  <button id="bPick" disabled>Pick marker</button>
+  <button id="bCal" disabled>Set corners</button>
+</div>
+<div class="row">
+  <button id="bRec" disabled>Record</button>
+  <button id="bMark" disabled>Mark phase</button>
+  <button id="bSave" disabled>Save CSV</button>
+</div>
+
+<div class="tune">
+  <label><span>Hue range</span><input type="range" id="sHue" min="4" max="60" value="18"><output id="oHue">18</output></label>
+  <label><span>Min color</span><input type="range" id="sSat" min="10" max="90" value="42"><output id="oSat">42</output></label>
+  <label><span>Still below</span><input type="range" id="sStill" min="1" max="20" value="4"><output id="oStill">4</output></label>
+  <label><span>Field size</span><input type="number" id="nField" value="144" min="12" step="1"><span style="color:var(--dim)">inches square</span></label>
+</div>
+
+<p class="status" id="status"></p>
+
+<script>
+const vid=document.getElementById('vid'), ov=document.getElementById('ov'), ctx=ov.getContext('2d');
+const proc=document.createElement('canvas'); proc.width=240; proc.height=180;
+const pctx=proc.getContext('2d',{willReadFrequently:true});
+const el=id=>document.getElementById(id);
+const status=el('status'), hint=el('hint');
+
+let mode='idle', target=null, corners=[], H=null;
+let track=[], recording=false, dwell=0, lastT=0, marks=0, last=null;
+
+const say=(m,bad)=>{status.textContent=m||''; status.classList.toggle('bad',!!bad);};
+const tip=m=>{hint.textContent=m||''; hint.classList.toggle('off',!m);};
+
+for(const [s,o] of [['sHue','oHue'],['sSat','oSat'],['sStill','oStill']])
+  el(s).addEventListener('input',()=>el(o).value=el(s).value);
+
+function rgb2hsv(r,g,b){
+  r/=255;g/=255;b/=255;
+  const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
+  let h=0;
+  if(d){
+    if(mx===r) h=((g-b)/d)%6; else if(mx===g) h=(b-r)/d+2; else h=(r-g)/d+4;
+    h*=60; if(h<0) h+=360;
+  }
+  return [h, mx?d/mx:0, mx];
+}
+const hueGap=(a,b)=>{const d=Math.abs(a-b)%360; return d>180?360-d:d;};
+
+function solveH(src,dst){
+  const A=[],b=[];
+  for(let i=0;i<4;i++){
+    const s=src[i], d=dst[i];
+    A.push([s.x,s.y,1,0,0,0,-s.x*d.x,-s.y*d.x]); b.push(d.x);
+    A.push([0,0,0,s.x,s.y,1,-s.x*d.y,-s.y*d.y]); b.push(d.y);
+  }
+  for(let i=0;i<8;i++){
+    let p=i;
+    for(let r=i+1;r<8;r++) if(Math.abs(A[r][i])>Math.abs(A[p][i])) p=r;
+    [A[i],A[p]]=[A[p],A[i]]; [b[i],b[p]]=[b[p],b[i]];
+    const pv=A[i][i];
+    if(Math.abs(pv)<1e-9) return null;
+    for(let c=i;c<8;c++) A[i][c]/=pv;
+    b[i]/=pv;
+    for(let r=0;r<8;r++){
+      if(r===i) continue;
+      const f=A[r][i]; if(!f) continue;
+      for(let c=i;c<8;c++) A[r][c]-=f*A[i][c];
+      b[r]-=f*b[i];
+    }
+  }
+  return b.concat([1]);
+}
+function applyH(h,x,y){
+  const w=h[6]*x+h[7]*y+1;
+  return {x:(h[0]*x+h[1]*y+h[2])/w, y:(h[3]*x+h[4]*y+h[5])/w};
+}
+
+el('bStart').onclick=async()=>{
+  if(!window.isSecureContext){
+    say('Cameras need https. Host this file on GitHub Pages or a local server, not file://.',true);
+    return;
+  }
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+    vid.srcObject=s; await vid.play();
+    ov.width=vid.videoWidth; ov.height=vid.videoHeight;
+    el('empty').style.display='none';
+    for(const b of ['bPick','bCal','bRec']) el(b).disabled=false;
+    el('bStart').textContent='Camera on'; el('bStart').disabled=true;
+    say('Now tap Pick marker, then tap the marker in the video.');
+    requestAnimationFrame(loop);
+  }catch(e){ say('Camera blocked: '+e.message+'. Check browser permissions.',true); }
+};
+
+el('bPick').onclick=()=>{
+  mode='pick'; el('bPick').classList.add('armed'); el('bCal').classList.remove('armed');
+  tip('Tap the marker on your robot.');
+};
+el('bCal').onclick=()=>{
+  mode='cal'; corners=[]; H=null;
+  el('bCal').classList.add('armed'); el('bPick').classList.remove('armed');
+  tip('Tap the 4 field corners: near-left, near-right, far-right, far-left.');
+};
+
+ov.addEventListener('pointerdown',e=>{
+  if(mode==='idle') return;
+  const r=ov.getBoundingClientRect();
+  const scale=Math.max(ov.width/r.width, ov.height/r.height);
+  const x=(e.clientX-r.left-r.width/2)*scale+ov.width/2;
+  const y=(e.clientY-r.top-r.height/2)*scale+ov.height/2;
+  if(mode==='pick'){
+    pctx.drawImage(vid,0,0,proc.width,proc.height);
+    const px=Math.round(x/ov.width*proc.width), py=Math.round(y/ov.height*proc.height);
+    const d=pctx.getImageData(Math.max(0,px-2),Math.max(0,py-2),5,5).data;
+    let hs=0,hc=0,sat=0;
+    for(let i=0;i<d.length;i+=4){
+      const [h,s]=rgb2hsv(d[i],d[i+1],d[i+2]);
+      if(s>.15){hs+=h;sat+=s;hc++;}
+    }
+    if(!hc){ say('That spot has no strong color. Use bright tape, not white or gray.',true); return; }
+    target={h:hs/hc,s:sat/hc};
+    mode='idle'; el('bPick').classList.remove('armed'); tip('');
+    say('Marker locked. Set corners next for real inches, or just record in pixels.');
+  } else if(mode==='cal'){
+    corners.push({x,y});
+    if(corners.length===4){
+      const F=Math.max(12,+el('nField').value||144);
+      H=solveH(corners,[{x:0,y:0},{x:F,y:0},{x:F,y:F},{x:0,y:F}]);
+      mode='idle'; el('bCal').classList.remove('armed'); tip('');
+      say(H?'Field mapped. Position now reads in inches.':'Those corners were collinear. Try again.',!H);
+    } else tip(['near-left','near-right','far-right','far-left'][corners.length]+' corner next.');
+  }
+});
+
+el('bRec').onclick=()=>{
+  recording=!recording;
+  el('bRec').classList.toggle('on',recording);
+  el('bRec').textContent=recording?'Stop':'Record';
+  el('bMark').disabled=!recording;
+  if(recording){ track=[]; marks=0; dwell=0; lastT=0; el('bSave').disabled=true; say('Recording.'); }
+  else { el('bSave').disabled=!track.length; say(track.length+' samples captured over '+
+    ((track.at(-1).t-track[0].t)/1000).toFixed(1)+' s.'); }
+};
+el('bMark').onclick=()=>{ marks++; if(track.length) track.at(-1).mark=marks; say('Phase '+marks+' marked.'); };
+
+el('bSave').onclick=()=>{
+  const t0=track[0].t;
+  const rows=['time_s,x,y,speed,units,phase'];
+  for(const p of track) rows.push([((p.t-t0)/1000).toFixed(3),p.x.toFixed(2),p.y.toFixed(2),
+    p.v.toFixed(2),H?'inches':'pixels',p.mark||''].join(','));
+  const url=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
+  const a=document.createElement('a');
+  a.href=url; a.download='run-'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'')+'.csv';
+  a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+
+function detect(){
+  pctx.drawImage(vid,0,0,proc.width,proc.height);
+  const d=pctx.getImageData(0,0,proc.width,proc.height).data;
+  const tol=+el('sHue').value, minS=+el('sSat').value/100;
+  let sx=0,sy=0,n=0;
+  for(let i=0,p=0;i<d.length;i+=4,p++){
+    const mx=Math.max(d[i],d[i+1],d[i+2]);
+    if(mx<50) continue;
+    const [h,s]=rgb2hsv(d[i],d[i+1],d[i+2]);
+    if(s<minS || hueGap(h,target.h)>tol) continue;
+    sx+=p%proc.width; sy+=(p/proc.width)|0; n++;
+  }
+  if(n<12) return null;
+  return {x:sx/n/proc.width*ov.width, y:sy/n/proc.height*ov.height, n};
+}
+
+function loop(now){
+  requestAnimationFrame(loop);
+  if(vid.readyState<2) return;
+  ctx.clearRect(0,0,ov.width,ov.height);
+
+  ctx.strokeStyle='#5DCAA5'; ctx.fillStyle='#5DCAA5'; ctx.lineWidth=3;
+  corners.forEach((c,i)=>{
+    ctx.beginPath(); ctx.arc(c.x,c.y,9,0,7); ctx.stroke();
+    ctx.font='600 22px system-ui'; ctx.fillText(i+1,c.x+14,c.y+8);
+  });
+
+  const hit=target?detect():null;
+
+  if(hit){
+    const pt=H?applyH(H,hit.x,hit.y):{x:hit.x,y:hit.y};
+    let v=0;
+    if(last){
+      const dt=(now-last.t)/1000;
+      if(dt>0.001) v=Math.hypot(pt.x-last.x,pt.y-last.y)/dt;
+    }
+    if(last) v=last.v*0.7+v*0.3;
+    last={x:pt.x,y:pt.y,v,t:now};
+
+    const still=v<+el('sStill').value;
+    if(recording){
+      if(lastT && still) dwell+=(now-lastT)/1000;
+      lastT=now;
+      track.push({t:now,x:pt.x,y:pt.y,v,sx:hit.x,sy:hit.y});
+      if(track.length>7200){ recording=false; el('bRec').click(); say('Hit the 4 minute cap.',true); }
+    }
+
+    el('rPos').textContent=pt.x.toFixed(0)+', '+pt.y.toFixed(0);
+    el('kPos').textContent=H?'position, in':'position, px';
+    el('rVel').textContent=v.toFixed(1);
+    el('kVel').textContent=H?'speed, in/s':'speed, px/s';
+    el('rDwell').textContent=dwell.toFixed(1);
+    el('cDwell').classList.toggle('hot',still);
+
+    ctx.strokeStyle=still?'#F5A524':'#5DCAA5'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(hit.x,hit.y,20,0,7); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(hit.x-30,hit.y); ctx.lineTo(hit.x-24,hit.y);
+    ctx.moveTo(hit.x+24,hit.y); ctx.lineTo(hit.x+30,hit.y);
+    ctx.moveTo(hit.x,hit.y-30); ctx.lineTo(hit.x,hit.y-24);
+    ctx.moveTo(hit.x,hit.y+24); ctx.lineTo(hit.x,hit.y+30);
+    ctx.stroke();
+  } else {
+    el('cDwell').classList.remove('hot');
+    if(target){ el('rPos').textContent='lost'; el('rVel').textContent='—'; }
+    lastT=0;
+  }
+
+  if(track.length>1){
+    ctx.strokeStyle='rgba(93,202,165,.65)'; ctx.lineWidth=2; ctx.beginPath();
+    const start=Math.max(0,track.length-900);
+    for(let i=start;i<track.length;i++){
+      const p=track[i];
+      i===start?ctx.moveTo(p.sx,p.sy):ctx.lineTo(p.sx,p.sy);
+    }
+    ctx.stroke();
+  }
+}
+</script>
